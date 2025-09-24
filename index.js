@@ -111,6 +111,12 @@ async function downloadImage(fileId, fileName) {
 // Function to fetch messages from Telegram channel
 async function fetchTelegramMessages() {
   try {
+    const imagesDir = path.join(__dirname, "images");
+    if (fs.existsSync(imagesDir)) {
+      fs.rmSync(imagesDir, { recursive: true, force: true });
+    }
+    fs.mkdirSync(imagesDir, { recursive: true });
+
     console.log("Fetching messages from Telegram channel...")
 
     // First, try to get chat info to verify bot has access

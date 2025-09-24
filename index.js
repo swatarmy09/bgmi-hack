@@ -219,8 +219,8 @@ async function fetchTelegramMessages() {
     }
 
     // Update cached data
-    cachedData.messages = [...messages, ...cachedData.messages].slice(0, 50)
-    cachedData.images = [...images, ...cachedData.images].slice(0, 20)
+    cachedData.messages = messages.slice(0, 50)
+    cachedData.images = images.slice(0, 20)
 
     console.log(
       `Processed ${processedCount} messages from correct chat, found ${messages.length} text messages and ${images.length} images`,
@@ -301,11 +301,6 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 
   // Initial fetch
   fetchTelegramMessages().catch(console.error)
-
-  // Fetch new messages every 30 seconds
-  setInterval(() => {
-    fetchTelegramMessages().catch(console.error)
-  }, 30000)
 })
 
 server.on("error", (error) => {

@@ -261,11 +261,7 @@ app.get("/api/telegram", async (req, res) => {
   try {
     console.log("API request received for /api/telegram")
     const data = await fetchTelegramMessages()
-    res.json({
-      success: true,
-      data: data,
-      timestamp: new Date().toISOString(),
-    })
+    res.json(data)
   } catch (error) {
     console.error("API error:", error)
     res.status(500).json({

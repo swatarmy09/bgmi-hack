@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3001
 
 // Your Telegram credentials
 const BOT_TOKEN = "6013210017:AAH9TkOQwYk4IiYMRAHIIaytfsoa6ck7VPQ"
-const CHAT_ID = "-4891957310"
+const CHAT_ID = "-1002655617004"
 
 app.use(cors())
 app.use(express.json())

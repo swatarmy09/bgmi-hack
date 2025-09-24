@@ -113,8 +113,19 @@ async function fetchTelegramMessages() {
   try {
     console.log("Fetching messages from Telegram channel...")
 
-    // Get channel updates
-    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${cachedData.lastUpdate + 1}&limit=100`
+    // First, try to get chat info to verify bot has access
+    const chatInfoUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getChat?chat_id=${CHAT_ID}`
+    const chatInfo = await fetchData(chatInfoUrl)
+
+    if (!chatInfo.ok) {
+      console.error("Cannot access chat. Bot might not be added to the group or lacks permissions:", chatInfo)
+      return cachedData
+    }
+
+    console.log("Chat info:", chatInfo.result.title, chatInfo.result.type)
+
+    // Get recent messages from the channel
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=-100&limit=100`
     const data = await fetchData(url)
 
     if (!data.ok) {
@@ -126,6 +137,7 @@ async function fetchTelegramMessages() {
 
     const messages = []
     const images = []
+    let processedCount = 0
 
     for (const update of data.result) {
       if (update.update_id > cachedData.lastUpdate) {
@@ -133,12 +145,26 @@ async function fetchTelegramMessages() {
       }
 
       const message = update.message || update.channel_post
-      if (!message) continue
+      if (!message) {
+        console.log("No message in update:", update.update_id)
+        continue
+      }
 
-      // Check if message is from our channel
-      if (message.chat.id.toString() !== CHAT_ID) continue
+      console.log(`Processing message from chat ${message.chat.id} (looking for ${CHAT_ID})`)
 
-      console.log("Processing message:", message.message_id)
+      // Check if message is from our channel (convert both to strings for comparison)
+      if (message.chat.id.toString() !== CHAT_ID.toString()) {
+        console.log(`Skipping message from different chat: ${message.chat.id}`)
+        continue
+      }
+
+      processedCount++
+      console.log(
+        "Processing message:",
+        message.message_id,
+        "Type:",
+        message.photo ? "photo" : message.text ? "text" : "other",
+      )
 
       // Process text messages
       if (message.text) {
@@ -148,10 +174,12 @@ async function fetchTelegramMessages() {
           date: new Date(message.date * 1000).toISOString(),
           from: message.from ? message.from.first_name : "Channel",
         })
+        console.log("Added text message:", message.text.substring(0, 50))
       }
 
       // Process images
       if (message.photo && message.photo.length > 0) {
+        console.log("Found photo in message:", message.message_id)
         const photo = message.photo[message.photo.length - 1] // Get highest resolution
         const fileName = `${message.message_id}_${photo.file_id}.jpg`
 
@@ -165,11 +193,13 @@ async function fetchTelegramMessages() {
             date: new Date(message.date * 1000).toISOString(),
             from: message.from ? message.from.first_name : "Channel",
           })
+          console.log("Added image:", fileName)
         }
       }
 
       // Process documents (if they are images)
       if (message.document && message.document.mime_type && message.document.mime_type.startsWith("image/")) {
+        console.log("Found image document in message:", message.message_id)
         const extension = message.document.mime_type.split("/")[1]
         const fileName = `${message.message_id}_${message.document.file_id}.${extension}`
 
@@ -183,6 +213,7 @@ async function fetchTelegramMessages() {
             date: new Date(message.date * 1000).toISOString(),
             from: message.from ? message.from.first_name : "Channel",
           })
+          console.log("Added document image:", fileName)
         }
       }
     }
@@ -191,7 +222,9 @@ async function fetchTelegramMessages() {
     cachedData.messages = [...messages, ...cachedData.messages].slice(0, 50)
     cachedData.images = [...images, ...cachedData.images].slice(0, 20)
 
-    console.log(`Processed ${messages.length} messages and ${images.length} images`)
+    console.log(
+      `Processed ${processedCount} messages from correct chat, found ${messages.length} text messages and ${images.length} images`,
+    )
 
     return cachedData
   } catch (error) {

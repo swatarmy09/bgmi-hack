@@ -1,322 +1,190 @@
-const express = require("express")
-const cors = require("cors")
-const https = require("https")
-const http = require("http")
-const fs = require("fs")
-const path = require("path")
+const express = require("express");
+const cors = require("cors");
+const https = require("https");
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
-const app = express()
-const PORT = process.env.PORT || 3001
+const app = express();
+const PORT = process.env.PORT || 3001;
 
-// Your Telegram credentials
-const BOT_TOKEN = "6013210017:AAH9TkOQwYk4IiYMRAHIIaytfsoa6ck7VPQ"
-const CHAT_ID = "-1002986007836"
+const BOT_TOKEN = "6013210017:AAH9TkOQwYk4IiYMRAHIIaytfsoa6ck7VPQ";
+const CHAT_ID = "-1002986007836";
 
-app.use(cors())
-app.use(express.json())
-app.use("/images", express.static(path.join(__dirname, "images")))
+app.use(cors());
+app.use(express.json());
+app.use("/images", express.static(path.join(__dirname, "images")));
 
-// Store for cached images and messages
 const cachedData = {
   messages: [],
   images: [],
   lastUpdate: 0,
-}
+  lastFetch: null,
+};
 
+// Fetch helpers
 function fetchData(url) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith("https") ? https : http
-
+    const client = url.startsWith("https") ? https : http;
     client
       .get(url, (res) => {
-        let data = ""
-
-        res.on("data", (chunk) => {
-          data += chunk
-        })
-
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
         res.on("end", () => {
           try {
-            resolve(JSON.parse(data))
-          } catch (error) {
-            resolve(data)
+            resolve(JSON.parse(data));
+          } catch {
+            resolve(data);
           }
-        })
+        });
       })
-      .on("error", (error) => {
-        reject(error)
-      })
-  })
+      .on("error", reject);
+  });
 }
 
 function downloadBinary(url) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith("https") ? https : http
-
+    const client = url.startsWith("https") ? https : http;
     client
       .get(url, (res) => {
-        const chunks = []
-
-        res.on("data", (chunk) => {
-          chunks.push(chunk)
-        })
-
-        res.on("end", () => {
-          resolve(Buffer.concat(chunks))
-        })
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
       })
-      .on("error", (error) => {
-        reject(error)
-      })
-  })
+      .on("error", reject);
+  });
 }
 
-// Function to download and save image
+// Download and cache image
 async function downloadImage(fileId, fileName) {
   try {
-    console.log(`Downloading image: ${fileName}`)
+    const imagesDir = path.join(__dirname, "images");
+    if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
 
-    // Get file path from Telegram
-    const fileUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`
-    const fileData = await fetchData(fileUrl)
+    const localPath = path.join(imagesDir, fileName);
+    if (fs.existsSync(localPath)) return `/images/${fileName}`; // cache hit ✅
 
-    if (!fileData.ok) {
-      console.log("Failed to get file path:", fileData)
-      return null
-    }
+    const fileUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`;
+    const fileData = await fetchData(fileUrl);
+    if (!fileData.ok) return null;
 
-    const filePath = fileData.result.file_path
-    const imageUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`
+    const imageUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.result.file_path}`;
+    const buffer = await downloadBinary(imageUrl);
+    fs.writeFileSync(localPath, buffer);
 
-    // Download image
-    const buffer = await downloadBinary(imageUrl)
-
-    // Save to local images folder
-    const imagesDir = path.join(__dirname, "images")
-    if (!fs.existsSync(imagesDir)) {
-      fs.mkdirSync(imagesDir, { recursive: true })
-    }
-
-    const localPath = path.join(imagesDir, fileName)
-    fs.writeFileSync(localPath, buffer)
-
-    console.log(`Image saved: ${fileName}`)
-    return `/images/${fileName}`
-  } catch (error) {
-    console.error("Error downloading image:", error)
-    return null
+    return `/images/${fileName}`;
+  } catch (err) {
+    console.error("❌ Image download failed:", err.message);
+    return null;
   }
 }
 
-// Function to fetch messages from Telegram channel
+// Telegram fetcher (parallel + cache)
 async function fetchTelegramMessages() {
   try {
-    const imagesDir = path.join(__dirname, "images");
-    if (fs.existsSync(imagesDir)) {
-      fs.rmSync(imagesDir, { recursive: true, force: true });
-    }
-    fs.mkdirSync(imagesDir, { recursive: true });
+    console.log("🔄 Updating Telegram data...");
 
-    console.log("Fetching messages from Telegram channel...")
+    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`;
+    const data = await fetchData(url);
 
-    // First, try to get chat info to verify bot has access
-    const chatInfoUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getChat?chat_id=${CHAT_ID}`
-    const chatInfo = await fetchData(chatInfoUrl)
-
-    if (!chatInfo.ok) {
-      console.error("Cannot access chat. Bot might not be added to the group or lacks permissions:", chatInfo)
-      return cachedData
+    if (!data.ok || !data.result) {
+      console.error("⚠️ Telegram API Error:", data);
+      return;
     }
 
-    console.log("Chat info:", chatInfo.result.title, chatInfo.result.type)
+    const messages = [];
+    const images = [];
 
-    // Get recent messages from the channel
-    const url = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=-100&limit=100`
-    const data = await fetchData(url)
+    const updates = data.result.filter((u) => {
+      const msg = u.message || u.channel_post;
+      return msg && msg.chat.id.toString() === CHAT_ID.toString();
+    });
 
-    if (!data.ok) {
-      console.error("Telegram API error:", data)
-      return cachedData
-    }
+    const imagePromises = [];
 
-    console.log(`Received ${data.result.length} updates`)
+    for (const update of updates) {
+      const msg = update.message || update.channel_post;
+      if (!msg) continue;
 
-    const messages = []
-    const images = []
-    let processedCount = 0
-
-    for (const update of data.result) {
-      if (update.update_id > cachedData.lastUpdate) {
-        cachedData.lastUpdate = update.update_id
-      }
-
-      const message = update.message || update.channel_post
-      if (!message) {
-        console.log("No message in update:", update.update_id)
-        continue
-      }
-
-      console.log(`Processing message from chat ${message.chat.id} (looking for ${CHAT_ID})`)
-
-      // Check if message is from our channel (convert both to strings for comparison)
-      if (message.chat.id.toString() !== CHAT_ID.toString()) {
-        console.log(`Skipping message from different chat: ${message.chat.id}`)
-        continue
-      }
-
-      processedCount++
-      console.log(
-        "Processing message:",
-        message.message_id,
-        "Type:",
-        message.photo ? "photo" : message.text ? "text" : "other",
-      )
-
-      // Process text messages
-      if (message.text) {
+      // Text messages
+      if (msg.text) {
         messages.push({
-          id: message.message_id,
-          text: message.text,
-          date: new Date(message.date * 1000).toISOString(),
-          from: message.from ? message.from.first_name : "Channel",
-        })
-        console.log("Added text message:", message.text.substring(0, 50))
+          id: msg.message_id,
+          text: msg.text,
+          date: new Date(msg.date * 1000).toISOString(),
+          from: msg.from ? msg.from.first_name : "Channel",
+        });
       }
 
-      // Process images
-      if (message.photo && message.photo.length > 0) {
-        console.log("Found photo in message:", message.message_id)
-        const photo = message.photo[message.photo.length - 1] // Get highest resolution
-        const fileName = `${message.message_id}_${photo.file_id}.jpg`
-
-        const localUrl = await downloadImage(photo.file_id, fileName)
-
-        if (localUrl) {
-          images.push({
-            id: message.message_id,
-            url: localUrl,
-            caption: message.caption || "",
-            date: new Date(message.date * 1000).toISOString(),
-            from: message.from ? message.from.first_name : "Channel",
-          })
-          console.log("Added image:", fileName)
-        }
-      }
-
-      // Process documents (if they are images)
-      if (message.document && message.document.mime_type && message.document.mime_type.startsWith("image/")) {
-        console.log("Found image document in message:", message.message_id)
-        const extension = message.document.mime_type.split("/")[1]
-        const fileName = `${message.message_id}_${message.document.file_id}.${extension}`
-
-        const localUrl = await downloadImage(message.document.file_id, fileName)
-
-        if (localUrl) {
-          images.push({
-            id: message.message_id,
-            url: localUrl,
-            caption: message.caption || message.document.file_name || "",
-            date: new Date(message.date * 1000).toISOString(),
-            from: message.from ? message.from.first_name : "Channel",
-          })
-          console.log("Added document image:", fileName)
-        }
+      // Photos
+      if (msg.photo && msg.photo.length > 0) {
+        const photo = msg.photo[msg.photo.length - 1];
+        const fileName = `${msg.message_id}_${photo.file_id}.jpg`;
+        imagePromises.push(
+          (async () => {
+            const localUrl = await downloadImage(photo.file_id, fileName);
+            if (localUrl) {
+              images.push({
+                id: msg.message_id,
+                url: localUrl,
+                caption: msg.caption || "",
+                date: new Date(msg.date * 1000).toISOString(),
+                from: msg.from ? msg.from.first_name : "Channel",
+              });
+            }
+          })()
+        );
       }
     }
 
-    // Update cached data
-    cachedData.messages = messages.slice(0, 50)
-    cachedData.images = images.slice(0, 20)
+    // Wait for all downloads in parallel
+    await Promise.all(imagePromises);
 
-    console.log(
-      `Processed ${processedCount} messages from correct chat, found ${messages.length} text messages and ${images.length} images`,
-    )
+    cachedData.messages = messages.slice(-50);
+    cachedData.images = images.slice(-20);
+    cachedData.lastFetch = new Date().toISOString();
 
-    return cachedData
-  } catch (error) {
-    console.error("Error fetching Telegram messages:", error)
-    return cachedData
+    console.log(`✅ Cache updated: ${messages.length} messages, ${images.length} images`);
+  } catch (err) {
+    console.error("❌ Fetch error:", err.message);
   }
 }
+
+// Serve cached instantly
+app.get("/api/telegram", (req, res) => {
+  res.json({
+    success: true,
+    lastFetch: cachedData.lastFetch,
+    messages: cachedData.messages,
+    images: cachedData.images,
+  });
+});
 
 app.get("/", (req, res) => {
   res.json({
-    status: "✅ Telegram Bot Server Running",
-    message: "Server is working correctly!",
-    endpoints: {
-      "/api/telegram": "Get messages and images from Telegram channel",
-      "/health": "Health check",
-      "/images/*": "Static image files",
-    },
-    config: {
-      botToken: BOT_TOKEN.substring(0, 10) + "...",
-      chatId: CHAT_ID,
-      port: PORT,
-    },
+    status: "✅ Fast Telegram Server Running",
+    endpoints: ["/api/telegram", "/health", "/images/*"],
     cache: {
       messages: cachedData.messages.length,
       images: cachedData.images.length,
-      lastUpdate: cachedData.lastUpdate,
+      lastFetch: cachedData.lastFetch,
     },
-    timestamp: new Date().toISOString(),
-  })
-})
+    time: new Date().toISOString(),
+  });
+});
 
-// API endpoint to get messages and images
-app.get("/api/telegram", async (req, res) => {
-  try {
-    console.log("API request received for /api/telegram")
-    const data = await fetchTelegramMessages()
-    res.json(data)
-  } catch (error) {
-    console.error("API error:", error)
-    res.status(500).json({
-      success: false,
-      error: "Failed to fetch data",
-      message: error.message,
-      timestamp: new Date().toISOString(),
-    })
-  }
-})
-
-// Health check endpoint
 app.get("/health", (req, res) => {
   res.json({
     status: "OK",
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     timestamp: new Date().toISOString(),
-  })
-})
+  });
+});
 
-app.use((err, req, res, next) => {
-  console.error("Server error:", err)
-  res.status(500).json({
-    error: "Internal server error",
-    message: err.message,
-    timestamp: new Date().toISOString(),
-  })
-})
-
-// Start server with better error handling
-const server = app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Telegram server running on port ${PORT}`)
-  console.log(`📱 Bot Token: ${BOT_TOKEN}`)
-  console.log(`💬 Chat ID: ${CHAT_ID}`)
-  console.log(`🌐 Server URL: http://localhost:${PORT}`)
-
-  // Initial fetch
-  fetchTelegramMessages().catch(console.error)
-})
-
-server.on("error", (error) => {
-  console.error("Server failed to start:", error)
-})
-
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down gracefully")
-  server.close(() => {
-    console.log("Server closed")
-    process.exit(0)
-  })
-})
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  fetchTelegramMessages(); // first load
+  setInterval(fetchTelegramMessages, 30000); // auto-refresh every 30 sec
+});
